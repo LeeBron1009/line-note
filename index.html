@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>共編記事本</title>
+<style>
+ *{box-sizing:border-box}
+ body{font-family:sans-serif;margin:0;background:#f5f5f5}
+ header{background:#06c755;color:#fff;padding:12px;display:flex;align-items:center;gap:8px}
+ header h1{font-size:17px;margin:0;flex:1}
+ button{border:0;border-radius:8px;padding:8px 12px;font-size:15px;cursor:pointer}
+ .btn{background:#fff;color:#06c755}
+ #list{padding:10px}
+ .file{background:#fff;border-radius:10px;padding:12px;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+ .file .info{flex:1;min-width:0}
+ .file .name{font-weight:bold;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ .file .meta{font-size:12px;color:#888}
+ .small{padding:6px 8px;font-size:13px;background:#eee}
+ #editor{display:none;height:100vh;flex-direction:column}
+ #title{font-size:17px;border:0;flex:1;padding:8px;border-radius:8px;min-width:0}
+ #text{flex:1;width:100%;border:0;padding:12px;font-size:16px;resize:none;outline:none}
+ #status{font-size:12px;color:#666;padding:6px 12px;background:#fff}
+ #empty{text-align:center;color:#999;padding:40px}
+</style>
+</head>
+<body>
+
+<div id="listView">
+  <header>
+    <h1>📁 共編檔案</h1>
+    <button class="btn" id="newBtn">＋ 新增</button>
+  </header>
+  <div id="who" style="padding:8px 12px;font-size:13px;color:#666">載入中...</div>
+  <div id="list"></div>
+</div>
+
+<div id="editor">
+  <header>
+    <button class="btn" id="backBtn">← 返回</button>
+    <input id="title" placeholder="檔名">
+  </header>
+  <div id="status"></div>
+  <textarea id="text" placeholder="大家一起寫..."></textarea>
+</div>
+
+<script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<script type="module">
+import {initializeApp} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import {getFirestore,collection,doc,addDoc,setDoc,deleteDoc,onSnapshot,query,orderBy,serverTimestamp}
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+/* ===== 只需要改這三處 ===== */
+const USE_LIFF = false;            // 測試時 false,接上 LINE 後改 true
+const LIFF_ID  = "填入LIFF_ID";
+const firebaseConfig = {
+  apiKey: "貼上你的apiKey",
+  authDomain: "貼上你的authDomain",
+  projectId: "貼上你的projectId"
+};
+/* ========================= */
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+
+let myName = "測試者", roomId = "demo", modeText = "(測試模式)";
+if (USE_LIFF) {
+  await liff.init({liffId: LIFF_ID});
+  if (!liff.isLoggedIn()) { liff.login(); }
+  const me = await liff.getProfile();
+  const ctx = liff.getContext() || {};
+  myName = me.displayName;
+  roomId = ctx.groupId || ctx.roomId || ctx.userId || "demo";
+  modeText = ctx.groupId ? "(群組模式)" : "(個人模式)";
+}
+
+const $ = id => document.getElementById(id);
+$("who").textContent = "你是:" + myName + modeText;
+
+const filesCol = collection(db,"rooms",roomId,"files");
+const listView=$("listView"), editor=$("editor"), listEl=$("list");
+const titleEl=$("title"), textEl=$("text"), statusEl=$("status");
+
+let unsubFile=null, currentId=null, typing=false, timer=null;
+
+function esc(s){return (s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+function fmt(ts){
+  if(!ts||!ts.toDate) return "";
+  const d=ts.toDate();
+  return (d.getMonth()+1)+"/"+d.getDate()+" "+String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0");
+}
+
+onSnapshot(query(filesCol,orderBy("updated","desc")), snap=>{
+  if(snap.empty){ listEl.innerHTML='<div id="empty">還沒有檔案,按右上角「＋ 新增」</div>'; return; }
+  listEl.innerHTML="";
+  snap.forEach(d=>{
+    const f=d.data();
+    const div=document.createElement("div");
+    div.className="file";
+    div.innerHTML=
+      '<div class="info"><div class="name">📄 '+esc(f.title||"未命名")+'</div>'+
+      '<div class="meta">'+esc(f.by||"")+' · '+fmt(f.updated)+'</div></div>'+
+      '<button class="small del">刪除</button>';
+    div.querySelector(".info").onclick=()=>openFile(d.id);
+    div.querySelector(".del").onclick=async e=>{
+      e.stopPropagation();
+      if(confirm("確定刪除「"+(f.title||"未命名")+"」?所有人都會看不到")) await deleteDoc(doc(filesCol,d.id));
+    };
+    listEl.appendChild(div);
+  });
+}, err=>{ listEl.innerHTML='<div id="empty">讀取失敗:'+esc(err.message)+'</div>'; });
+
+$("newBtn").onclick=async ()=>{
+  const name=prompt("檔名:","新檔案");
+  if(!name) return;
+  const ref=await addDoc(filesCol,{title:name,text:"",by:myName,updated:serverTimestamp()});
+  openFile(ref.id);
+};
+
+function openFile(id){
+  currentId=id;
+  listView.style.display="none";
+  editor.style.display="flex";
+  if(unsubFile) unsubFile();
+  unsubFile=onSnapshot(doc(filesCol,id), snap=>{
+    if(!snap.exists()){ closeFile(); alert("這個檔案已被刪除"); return; }
+    const f=snap.data();
+    if(!typing){
+      if(textEl.value!==f.text) textEl.value=f.text||"";
+      if(document.activeElement!==titleEl) titleEl.value=f.title||"";
+    }
+    statusEl.textContent="最後編輯:"+(f.by||"")+" "+fmt(f.updated);
+  });
+}
+
+function closeFile(){
+  if(unsubFile){unsubFile();unsubFile=null;}
+  currentId=null;
+  editor.style.display="none";
+  listView.style.display="block";
+}
+$("backBtn").onclick=closeFile;
+
+function save(){
+  typing=true;
+  clearTimeout(timer);
+  statusEl.textContent="儲存中...";
+  timer=setTimeout(async ()=>{
+    if(!currentId) return;
+    await setDoc(doc(filesCol,currentId),{
+      title:titleEl.value||"未命名",
+      text:textEl.value,
+      by:myName,
+      updated:serverTimestamp()
+    });
+    typing=false;
+  },600);
+}
+textEl.addEventListener("input",save);
+titleEl.addEventListener("input",save);
+</script>
+</body>
+</html>
