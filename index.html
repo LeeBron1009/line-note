@@ -13,7 +13,7 @@
  .btn{background:#fff;color:#06c755}
  #list{padding:10px}
  .file{background:#fff;border-radius:10px;padding:12px;margin-bottom:8px;display:flex;align-items:center;gap:8px}
- .file .info{flex:1;min-width:0}
+ .file .info{flex:1;min-width:0;cursor:pointer}
  .file .name{font-weight:bold;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
  .file .meta{font-size:12px;color:#888}
  .small{padding:6px 8px;font-size:13px;background:#eee}
@@ -29,6 +29,7 @@
 <div id="listView">
   <header>
     <h1>📁 共編檔案</h1>
+    <button class="btn" id="shareBtn">🔗 邀請</button>
     <button class="btn" id="newBtn">＋ 新增</button>
   </header>
   <div id="who" style="padding:8px 12px;font-size:13px;color:#666">載入中...</div>
@@ -62,20 +63,35 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
+const $ = id => document.getElementById(id);
 
-let myName = "測試者", roomId = "demo", modeText = "(測試模式)";
+let myName = "測試者";
 if (USE_LIFF) {
   await liff.init({liffId: LIFF_ID});
   if (!liff.isLoggedIn()) { liff.login(); }
   const me = await liff.getProfile();
-  const ctx = liff.getContext() || {};
   myName = me.displayName;
-  roomId = ctx.groupId || ctx.roomId || ctx.userId || "demo";
-  modeText = ctx.groupId ? "(群組模式)" : "(個人模式)";
 }
 
-const $ = id => document.getElementById(id);
-$("who").textContent = "你是:" + myName + modeText;
+const params = new URLSearchParams(location.search);
+let roomId = params.get("room") || localStorage.getItem("roomId");
+if (!roomId) {
+  roomId = Math.random().toString(36).slice(2, 10);
+}
+localStorage.setItem("roomId", roomId);
+
+$("who").textContent = "你是:" + myName + " ｜房間:" + roomId;
+
+$("shareBtn").onclick = async () => {
+  const base = USE_LIFF ? "https://liff.line.me/" + LIFF_ID : location.origin + location.pathname;
+  const link = base + "?room=" + roomId;
+  try {
+    await navigator.clipboard.writeText(link);
+    alert("已複製邀請連結,貼到群組:\n" + link);
+  } catch (e) {
+    prompt("請複製這個連結:", link);
+  }
+};
 
 const filesCol = collection(db,"rooms",roomId,"files");
 const listView=$("listView"), editor=$("editor"), listEl=$("list");
@@ -83,7 +99,9 @@ const titleEl=$("title"), textEl=$("text"), statusEl=$("status");
 
 let unsubFile=null, currentId=null, typing=false, timer=null;
 
-function esc(s){return (s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+function esc(s){
+  return (s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
 function fmt(ts){
   if(!ts||!ts.toDate) return "";
   const d=ts.toDate();
@@ -91,7 +109,10 @@ function fmt(ts){
 }
 
 onSnapshot(query(filesCol,orderBy("updated","desc")), snap=>{
-  if(snap.empty){ listEl.innerHTML='<div id="empty">還沒有檔案,按右上角「＋ 新增」</div>'; return; }
+  if(snap.empty){
+    listEl.innerHTML='<div id="empty">還沒有檔案,按右上角「＋ 新增」</div>';
+    return;
+  }
   listEl.innerHTML="";
   snap.forEach(d=>{
     const f=d.data();
@@ -104,11 +125,15 @@ onSnapshot(query(filesCol,orderBy("updated","desc")), snap=>{
     div.querySelector(".info").onclick=()=>openFile(d.id);
     div.querySelector(".del").onclick=async e=>{
       e.stopPropagation();
-      if(confirm("確定刪除「"+(f.title||"未命名")+"」?所有人都會看不到")) await deleteDoc(doc(filesCol,d.id));
+      if(confirm("確定刪除「"+(f.title||"未命名")+"」?所有人都會看不到")){
+        await deleteDoc(doc(filesCol,d.id));
+      }
     };
     listEl.appendChild(div);
   });
-}, err=>{ listEl.innerHTML='<div id="empty">讀取失敗:'+esc(err.message)+'</div>'; });
+}, err=>{
+  listEl.innerHTML='<div id="empty">讀取失敗:'+esc(err.message)+'</div>';
+});
 
 $("newBtn").onclick=async ()=>{
   const name=prompt("檔名:","新檔案");
