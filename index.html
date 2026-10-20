@@ -139,7 +139,7 @@ function render(){
     if(!!f.deleted===showTrash) items.push({id:d.id,f});
   });
   $("trashbar").style.display=showTrash?"block":"none";
-  $("headTitle").textContent=showTrash?"🗑 垃圾桶":"📁 共編檔案";
+  $("headTitle").textContent=showTrash?"🗑 垃圾桶":"📁 記事本";
   $("trashBtn").textContent=showTrash?"← 檔案":"🗑";
   $("newBtn").style.display=showTrash?"none":"";
   $("shareBtn").style.display=showTrash?"none":"";
