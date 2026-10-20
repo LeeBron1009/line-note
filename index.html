@@ -17,22 +17,30 @@
  .file .name{font-weight:bold;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
  .file .meta{font-size:12px;color:#888}
  .small{padding:6px 8px;font-size:13px;background:#eee}
+ .red{background:#fdecea;color:#c0392b}
+ .green{background:#e6f7ec;color:#06a047}
  #editor{display:none;height:100vh;flex-direction:column}
  #title{font-size:17px;border:0;flex:1;padding:8px;border-radius:8px;min-width:0}
  #text{flex:1;width:100%;border:0;padding:12px;font-size:16px;resize:none;outline:none}
  #status{font-size:12px;color:#666;padding:6px 12px;background:#fff}
  #empty{text-align:center;color:#999;padding:40px}
+ #toast{display:none;position:fixed;left:12px;right:12px;bottom:20px;background:#333;color:#fff;
+   padding:12px 14px;border-radius:10px;align-items:center;justify-content:space-between;z-index:9}
+ #toast button{background:#06c755;color:#fff;padding:6px 12px}
+ .trashbar{background:#fff3cd;color:#856404;padding:8px 12px;font-size:13px}
 </style>
 </head>
 <body>
 
 <div id="listView">
   <header>
-    <h1>📁 共編檔案</h1>
+    <h1 id="headTitle">📁 共編檔案</h1>
+    <button class="btn" id="trashBtn">🗑</button>
     <button class="btn" id="shareBtn">🔗 邀請</button>
     <button class="btn" id="newBtn">＋ 新增</button>
   </header>
   <div id="who" style="padding:8px 12px;font-size:13px;color:#666">載入中...</div>
+  <div id="trashbar" class="trashbar" style="display:none">垃圾桶:可以還原,或永久刪除</div>
   <div id="list"></div>
 </div>
 
@@ -45,10 +53,12 @@
   <textarea id="text" placeholder="大家一起寫..."></textarea>
 </div>
 
+<div id="toast"><span id="toastMsg"></span><button id="undoBtn">復原</button></div>
+
 <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
 <script type="module">
 import {initializeApp} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import {getFirestore,collection,doc,addDoc,setDoc,deleteDoc,onSnapshot,query,orderBy,serverTimestamp}
+import {getFirestore,collection,doc,addDoc,setDoc,updateDoc,deleteDoc,onSnapshot,query,orderBy,serverTimestamp}
   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 /* ===== 只需要改這三處 ===== */
@@ -75,9 +85,7 @@ if (USE_LIFF) {
 
 const params = new URLSearchParams(location.search);
 let roomId = params.get("room") || localStorage.getItem("roomId");
-if (!roomId) {
-  roomId = Math.random().toString(36).slice(2, 10);
-}
+if (!roomId) { roomId = Math.random().toString(36).slice(2, 10); }
 localStorage.setItem("roomId", roomId);
 
 $("who").textContent = "你是:" + myName + " ｜房間:" + roomId;
@@ -98,6 +106,7 @@ const listView=$("listView"), editor=$("editor"), listEl=$("list");
 const titleEl=$("title"), textEl=$("text"), statusEl=$("status");
 
 let unsubFile=null, currentId=null, typing=false, timer=null;
+let showTrash=false, lastSnap=null, toastTimer=null, undoId=null;
 
 function esc(s){
   return (s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -108,37 +117,82 @@ function fmt(ts){
   return (d.getMonth()+1)+"/"+d.getDate()+" "+String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0");
 }
 
-onSnapshot(query(filesCol,orderBy("updated","desc")), snap=>{
-  if(snap.empty){
-    listEl.innerHTML='<div id="empty">還沒有檔案,按右上角「＋ 新增」</div>';
+function toast(msg, id){
+  undoId=id;
+  $("toastMsg").textContent=msg;
+  $("toast").style.display="flex";
+  clearTimeout(toastTimer);
+  toastTimer=setTimeout(()=>{$("toast").style.display="none";undoId=null;},5000);
+}
+$("undoBtn").onclick=async ()=>{
+  if(!undoId) return;
+  await updateDoc(doc(filesCol,undoId),{deleted:false});
+  $("toast").style.display="none";
+  undoId=null;
+};
+
+function render(){
+  if(!lastSnap) return;
+  const items=[];
+  lastSnap.forEach(d=>{
+    const f=d.data();
+    if(!!f.deleted===showTrash) items.push({id:d.id,f});
+  });
+  $("trashbar").style.display=showTrash?"block":"none";
+  $("headTitle").textContent=showTrash?"🗑 垃圾桶":"📁 共編檔案";
+  $("trashBtn").textContent=showTrash?"← 檔案":"🗑";
+  $("newBtn").style.display=showTrash?"none":"";
+  $("shareBtn").style.display=showTrash?"none":"";
+
+  if(items.length===0){
+    listEl.innerHTML='<div id="empty">'+(showTrash?'垃圾桶是空的':'還沒有檔案,按右上角「＋ 新增」')+'</div>';
     return;
   }
   listEl.innerHTML="";
-  snap.forEach(d=>{
-    const f=d.data();
+  items.forEach(({id,f})=>{
     const div=document.createElement("div");
     div.className="file";
-    div.innerHTML=
-      '<div class="info"><div class="name">📄 '+esc(f.title||"未命名")+'</div>'+
-      '<div class="meta">'+esc(f.by||"")+' · '+fmt(f.updated)+'</div></div>'+
-      '<button class="small del">刪除</button>';
-    div.querySelector(".info").onclick=()=>openFile(d.id);
-    div.querySelector(".del").onclick=async e=>{
-      e.stopPropagation();
-      if(confirm("確定刪除「"+(f.title||"未命名")+"」?所有人都會看不到")){
-        await deleteDoc(doc(filesCol,d.id));
-      }
-    };
+    if(!showTrash){
+      div.innerHTML=
+        '<div class="info"><div class="name">📄 '+esc(f.title||"未命名")+'</div>'+
+        '<div class="meta">'+esc(f.by||"")+' · '+fmt(f.updated)+'</div></div>'+
+        '<button class="small red del">刪除</button>';
+      div.querySelector(".info").onclick=()=>openFile(id);
+      div.querySelector(".del").onclick=async e=>{
+        e.stopPropagation();
+        await updateDoc(doc(filesCol,id),{deleted:true,deletedBy:myName,deletedAt:serverTimestamp()});
+        toast("已移到垃圾桶:"+(f.title||"未命名"), id);
+      };
+    } else {
+      div.innerHTML=
+        '<div class="info" style="cursor:default"><div class="name">📄 '+esc(f.title||"未命名")+'</div>'+
+        '<div class="meta">刪除者:'+esc(f.deletedBy||"")+' · '+fmt(f.deletedAt)+'</div></div>'+
+        '<button class="small green res">還原</button>'+
+        '<button class="small red perm">永久刪除</button>';
+      div.querySelector(".res").onclick=()=>updateDoc(doc(filesCol,id),{deleted:false});
+      div.querySelector(".perm").onclick=async ()=>{
+        if(confirm("永久刪除「"+(f.title||"未命名")+"」?這個無法復原!")){
+          await deleteDoc(doc(filesCol,id));
+        }
+      };
+    }
     listEl.appendChild(div);
   });
+}
+
+onSnapshot(query(filesCol,orderBy("updated","desc")), snap=>{
+  lastSnap=snap;
+  render();
 }, err=>{
   listEl.innerHTML='<div id="empty">讀取失敗:'+esc(err.message)+'</div>';
 });
 
+$("trashBtn").onclick=()=>{ showTrash=!showTrash; render(); };
+
 $("newBtn").onclick=async ()=>{
   const name=prompt("檔名:","新檔案");
   if(!name) return;
-  const ref=await addDoc(filesCol,{title:name,text:"",by:myName,updated:serverTimestamp()});
+  const ref=await addDoc(filesCol,{title:name,text:"",by:myName,deleted:false,updated:serverTimestamp()});
   openFile(ref.id);
 };
 
@@ -150,6 +204,7 @@ function openFile(id){
   unsubFile=onSnapshot(doc(filesCol,id), snap=>{
     if(!snap.exists()){ closeFile(); alert("這個檔案已被刪除"); return; }
     const f=snap.data();
+    if(f.deleted){ closeFile(); alert("這個檔案已被移到垃圾桶"); return; }
     if(!typing){
       if(textEl.value!==f.text) textEl.value=f.text||"";
       if(document.activeElement!==titleEl) titleEl.value=f.title||"";
@@ -161,6 +216,7 @@ function openFile(id){
 function closeFile(){
   if(unsubFile){unsubFile();unsubFile=null;}
   currentId=null;
+  typing=false;
   editor.style.display="none";
   listView.style.display="block";
 }
@@ -177,7 +233,7 @@ function save(){
       text:textEl.value,
       by:myName,
       updated:serverTimestamp()
-    });
+    },{merge:true});
     typing=false;
   },600);
 }
